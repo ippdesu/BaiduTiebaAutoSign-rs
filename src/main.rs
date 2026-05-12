@@ -26,29 +26,6 @@ fn default_headers() -> HeaderMap {
     headers
 }
 
-async fn retry_request<F, Fut, T>(retries: u32, delay_base: f64, f: F) -> Result<T, String>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
-{
-    let mut last_err = String::new();
-    for attempt in 0..retries {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                last_err = e;
-                if attempt < retries - 1 {
-                    let wait = delay_base * (2.0_f64.powi(attempt as i32))
-                        + rand::thread_rng().gen_range(0.0..1.0);
-                    warn!("请求失败(尝试 {}/{}): {}，{:.1}s 后重试", attempt + 1, retries, last_err, wait);
-                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-                }
-            }
-        }
-    }
-    Err(format!("请求失败，已达最大重试次数 {}: {}", retries, last_err))
-}
-
 fn encode_data(data: &mut BTreeMap<String, String>) {
     let raw: String = data
         .keys()
@@ -63,38 +40,65 @@ async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
     info!("开始获取tbs");
     let header_cookie = format!("BDUSS={}", bduss);
 
-    retry_request(3, 1.5, || async {
+    for attempt in 0u32..3 {
         let mut headers = default_headers();
         headers.insert(
             COOKIE,
             HeaderValue::from_str(&header_cookie).map_err(|e| format!("无效的Cookie值: {}", e))?,
         );
 
-        let resp = client
-            .get(TBS_URL)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| format!("获取tbs请求失败: {}", e))?;
-
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("tbs响应读取失败: {}", e))?;
-
-        if text.trim().is_empty() {
-            return Err("空响应内容".to_string());
+        match client.get(TBS_URL).headers(headers).send().await {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => {
+                    if text.trim().is_empty() {
+                        if attempt < 2 {
+                            let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                            warn!("获取tbs空响应(尝试 {}/3)，{:.1}s 后重试", attempt + 1, wait);
+                            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                            continue;
+                        }
+                        return Err("空响应内容".to_string());
+                    }
+                    match serde_json::from_str::<Value>(&text) {
+                        Ok(json) => {
+                            if let Some(tbs) = json["tbs"].as_str() {
+                                return Ok(tbs.to_string());
+                            }
+                            return Err(format!("tbs字段缺失: {}", json));
+                        }
+                        Err(e) => {
+                            if attempt < 2 {
+                                let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                                warn!("获取tbs JSON解析失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                                continue;
+                            }
+                            return Err(format!("tbs响应JSON解析失败: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                        warn!("获取tbs请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                        continue;
+                    }
+                    return Err(format!("获取tbs请求失败: {}", e));
+                }
+            },
+            Err(e) => {
+                if attempt < 2 {
+                    let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                    warn!("获取tbs请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                    continue;
+                }
+                return Err(format!("获取tbs请求失败: {}", e));
+            }
         }
-
-        let json: Value =
-            serde_json::from_str(&text).map_err(|e| format!("tbs响应JSON解析失败: {}", e))?;
-
-        json["tbs"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("tbs字段缺失: {}", json))
-    })
-    .await
+    }
+    Err("获取tbs已达最大重试次数".to_string())
 }
 
 async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String> {
@@ -126,27 +130,74 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
         ]);
         encode_data(&mut data);
 
-        let json = retry_request(3, 1.5, || async {
-            let resp = client
-                .post(LIKE_URL)
-                .headers(default_headers())
-                .form(&data)
-                .send()
-                .await
-                .map_err(|e| format!("获取贴吧列表请求失败: {}", e))?;
-
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("贴吧列表响应读取失败: {}", e))?;
-
-            if text.trim().is_empty() {
-                return Err("空响应内容".to_string());
+        let json = {
+            let mut page_json = Err("未尝试".to_string());
+            for attempt in 0u32..3 {
+                match client
+                    .post(LIKE_URL)
+                    .headers(default_headers())
+                    .form(&data)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => match resp.text().await {
+                        Ok(text) => {
+                            if text.trim().is_empty() {
+                                if attempt < 2 {
+                                    let wait = 1.5 * (2.0_f64.powi(attempt))
+                                        + rand::thread_rng().gen_range(0.0..1.0);
+                                    warn!("获取贴吧列表空响应(尝试 {}/3)，{:.1}s 后重试", attempt + 1, wait);
+                                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                                    continue;
+                                }
+                                page_json = Err("空响应内容".to_string());
+                                break;
+                            }
+                            match serde_json::from_str::<Value>(&text) {
+                                Ok(v) => {
+                                    page_json = Ok(v);
+                                    break;
+                                }
+                                Err(e) => {
+                                    if attempt < 2 {
+                                        let wait = 1.5 * (2.0_f64.powi(attempt))
+                                            + rand::thread_rng().gen_range(0.0..1.0);
+                                        warn!("贴吧列表JSON解析失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                                        continue;
+                                    }
+                                    page_json = Err(format!("贴吧列表JSON解析失败: {}", e));
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if attempt < 2 {
+                                let wait = 1.5 * (2.0_f64.powi(attempt))
+                                    + rand::thread_rng().gen_range(0.0..1.0);
+                                warn!("贴吧列表响应读取失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                                continue;
+                            }
+                            page_json = Err(format!("贴吧列表响应读取失败: {}", e));
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        if attempt < 2 {
+                            let wait = 1.5 * (2.0_f64.powi(attempt))
+                                + rand::thread_rng().gen_range(0.0..1.0);
+                            warn!("获取贴吧列表请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
+                            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                            continue;
+                        }
+                        page_json = Err(format!("获取贴吧列表请求失败: {}", e));
+                        break;
+                    }
+                }
             }
-
-            serde_json::from_str(&text).map_err(|e| format!("贴吧列表JSON解析失败: {}", e))
-        })
-        .await?;
+            page_json
+        }?;
 
         if let Some(forum_list) = json.get("forum_list") {
             for key in &["non-gconforum", "gconforum"] {
@@ -204,20 +255,49 @@ async fn client_sign(
     ]);
     encode_data(&mut data);
 
-    match retry_request(3, 1.5, || async {
-        let resp = client
-            .post(SIGN_URL)
-            .headers(default_headers())
-            .form(&data)
-            .send()
-            .await
-            .map_err(|e| format!("签到请求失败: {}", e))?;
-
-        resp.text()
-            .await
-            .map_err(|e| format!("签到响应读取失败: {}", e))
-    })
-    .await
+    let sign_result: Result<String, String> = {
+        let mut result = Err("未尝试".to_string());
+        for attempt in 0u32..3 {
+            match client
+                .post(SIGN_URL)
+                .headers(default_headers())
+                .form(&data)
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.text().await {
+                    Ok(text) => {
+                        result = Ok(text);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt < 2 {
+                            let wait = 1.5 * (2.0_f64.powi(attempt))
+                                + rand::thread_rng().gen_range(0.0..1.0);
+                            warn!("{} 签到响应读取失败(尝试 {}/3): {}，{:.1}s 后重试", log_prefix, attempt + 1, e, wait);
+                            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                            continue;
+                        }
+                        result = Err(format!("签到响应读取失败: {}", e));
+                        break;
+                    }
+                },
+                Err(e) => {
+                    if attempt < 2 {
+                        let wait = 1.5 * (2.0_f64.powi(attempt))
+                            + rand::thread_rng().gen_range(0.0..1.0);
+                        warn!("{} 签到请求失败(尝试 {}/3): {}，{:.1}s 后重试", log_prefix, attempt + 1, e, wait);
+                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                        continue;
+                    }
+                    result = Err(format!("签到请求失败: {}", e));
+                    break;
+                }
+            }
+        }
+        result
+    };
+    match sign_result
     {
         Ok(text) => {
             let json: Value = match serde_json::from_str(&text) {
