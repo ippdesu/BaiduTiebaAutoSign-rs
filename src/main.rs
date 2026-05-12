@@ -173,8 +173,8 @@ async fn client_sign(
                 match error_code {
                     "0" => {
                         let rank = json["user_info"]["user_sign_rank"]
-                            .as_u64()
-                            .unwrap_or(0);
+                            .as_str()
+                            .unwrap_or("0");
                         info!("{} 签到成功，第{}个签到", log_prefix, rank);
                     }
                     "160002" => {
