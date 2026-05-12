@@ -52,7 +52,7 @@ async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
                 Ok(text) => {
                     if text.trim().is_empty() {
                         if attempt < 2 {
-                            let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                            let wait = 1.5 * (2.0_f64.powi(attempt as i32)) + rand::thread_rng().gen_range(0.0..1.0);
                             warn!("获取tbs空响应(尝试 {}/3)，{:.1}s 后重试", attempt + 1, wait);
                             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                             continue;
@@ -68,7 +68,7 @@ async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
                         }
                         Err(e) => {
                             if attempt < 2 {
-                                let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                                let wait = 1.5 * (2.0_f64.powi(attempt as i32)) + rand::thread_rng().gen_range(0.0..1.0);
                                 warn!("获取tbs JSON解析失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                                 continue;
@@ -79,7 +79,7 @@ async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
                 }
                 Err(e) => {
                     if attempt < 2 {
-                        let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                        let wait = 1.5 * (2.0_f64.powi(attempt as i32)) + rand::thread_rng().gen_range(0.0..1.0);
                         warn!("获取tbs请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                         continue;
@@ -89,7 +89,7 @@ async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
             },
             Err(e) => {
                 if attempt < 2 {
-                    let wait = 1.5 * (2.0_f64.powi(attempt)) + rand::thread_rng().gen_range(0.0..1.0);
+                    let wait = 1.5 * (2.0_f64.powi(attempt as i32)) + rand::thread_rng().gen_range(0.0..1.0);
                     warn!("获取tbs请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                     tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                     continue;
@@ -144,7 +144,7 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
                         Ok(text) => {
                             if text.trim().is_empty() {
                                 if attempt < 2 {
-                                    let wait = 1.5 * (2.0_f64.powi(attempt))
+                                    let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                                         + rand::thread_rng().gen_range(0.0..1.0);
                                     warn!("获取贴吧列表空响应(尝试 {}/3)，{:.1}s 后重试", attempt + 1, wait);
                                     tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -160,7 +160,7 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
                                 }
                                 Err(e) => {
                                     if attempt < 2 {
-                                        let wait = 1.5 * (2.0_f64.powi(attempt))
+                                        let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                                             + rand::thread_rng().gen_range(0.0..1.0);
                                         warn!("贴吧列表JSON解析失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                                         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -173,7 +173,7 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
                         }
                         Err(e) => {
                             if attempt < 2 {
-                                let wait = 1.5 * (2.0_f64.powi(attempt))
+                                let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                                     + rand::thread_rng().gen_range(0.0..1.0);
                                 warn!("贴吧列表响应读取失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -185,7 +185,7 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
                     },
                     Err(e) => {
                         if attempt < 2 {
-                            let wait = 1.5 * (2.0_f64.powi(attempt))
+                            let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                                 + rand::thread_rng().gen_range(0.0..1.0);
                             warn!("获取贴吧列表请求失败(尝试 {}/3): {}，{:.1}s 后重试", attempt + 1, e, wait);
                             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -272,7 +272,7 @@ async fn client_sign(
                     }
                     Err(e) => {
                         if attempt < 2 {
-                            let wait = 1.5 * (2.0_f64.powi(attempt))
+                            let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                                 + rand::thread_rng().gen_range(0.0..1.0);
                             warn!("{} 签到响应读取失败(尝试 {}/3): {}，{:.1}s 后重试", log_prefix, attempt + 1, e, wait);
                             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -284,7 +284,7 @@ async fn client_sign(
                 },
                 Err(e) => {
                     if attempt < 2 {
-                        let wait = 1.5 * (2.0_f64.powi(attempt))
+                        let wait = 1.5 * (2.0_f64.powi(attempt as i32))
                             + rand::thread_rng().gen_range(0.0..1.0);
                         warn!("{} 签到请求失败(尝试 {}/3): {}，{:.1}s 后重试", log_prefix, attempt + 1, e, wait);
                         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
