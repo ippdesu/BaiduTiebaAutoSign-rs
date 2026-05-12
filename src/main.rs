@@ -1,6 +1,6 @@
 use log::{error, info, warn};
 use rand::Rng;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, CONNECTION, HOST, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, CONNECTION, COOKIE, HOST, USER_AGENT};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -26,6 +26,29 @@ fn default_headers() -> HeaderMap {
     headers
 }
 
+async fn retry_request<F, Fut, T>(retries: u32, delay_base: f64, f: F) -> Result<T, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut last_err = String::new();
+    for attempt in 0..retries {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last_err = e;
+                if attempt < retries - 1 {
+                    let wait = delay_base * (2.0_f64.powi(attempt as i32))
+                        + rand::thread_rng().gen_range(0.0..1.0);
+                    warn!("请求失败(尝试 {}/{}): {}，{:.1}s 后重试", attempt + 1, retries, last_err, wait);
+                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                }
+            }
+        }
+    }
+    Err(format!("请求失败，已达最大重试次数 {}: {}", retries, last_err))
+}
+
 fn encode_data(data: &mut BTreeMap<String, String>) {
     let raw: String = data
         .keys()
@@ -38,28 +61,40 @@ fn encode_data(data: &mut BTreeMap<String, String>) {
 
 async fn get_tbs(client: &Client, bduss: &str) -> Result<String, String> {
     info!("开始获取tbs");
-    let mut headers = default_headers();
-    headers.insert(
-        "Cookie",
-        HeaderValue::from_str(&format!("BDUSS={}", bduss)).unwrap(),
-    );
+    let header_cookie = format!("BDUSS={}", bduss);
 
-    let resp = client
-        .get(TBS_URL)
-        .headers(headers)
-        .send()
-        .await
-        .map_err(|e| format!("获取tbs请求失败: {}", e))?;
+    retry_request(3, 1.5, || async {
+        let mut headers = default_headers();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&header_cookie).map_err(|e| format!("无效的Cookie值: {}", e))?,
+        );
 
-    let json: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("tbs响应JSON解析失败: {}", e))?;
+        let resp = client
+            .get(TBS_URL)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| format!("获取tbs请求失败: {}", e))?;
 
-    json["tbs"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("tbs字段缺失: {}", json))
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("tbs响应读取失败: {}", e))?;
+
+        if text.trim().is_empty() {
+            return Err("空响应内容".to_string());
+        }
+
+        let json: Value =
+            serde_json::from_str(&text).map_err(|e| format!("tbs响应JSON解析失败: {}", e))?;
+
+        json["tbs"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("tbs字段缺失: {}", json))
+    })
+    .await
 }
 
 async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String> {
@@ -91,18 +126,27 @@ async fn get_favorite(client: &Client, bduss: &str) -> Result<Vec<Value>, String
         ]);
         encode_data(&mut data);
 
-        let resp = client
-            .post(LIKE_URL)
-            .headers(default_headers())
-            .form(&data)
-            .send()
-            .await
-            .map_err(|e| format!("获取贴吧列表请求失败: {}", e))?;
+        let json = retry_request(3, 1.5, || async {
+            let resp = client
+                .post(LIKE_URL)
+                .headers(default_headers())
+                .form(&data)
+                .send()
+                .await
+                .map_err(|e| format!("获取贴吧列表请求失败: {}", e))?;
 
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("贴吧列表JSON解析失败: {}", e))?;
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| format!("贴吧列表响应读取失败: {}", e))?;
+
+            if text.trim().is_empty() {
+                return Err("空响应内容".to_string());
+            }
+
+            serde_json::from_str(&text).map_err(|e| format!("贴吧列表JSON解析失败: {}", e))
+        })
+        .await?;
 
         if let Some(forum_list) = json.get("forum_list") {
             for key in &["non-gconforum", "gconforum"] {
@@ -160,39 +204,49 @@ async fn client_sign(
     ]);
     encode_data(&mut data);
 
-    match client
-        .post(SIGN_URL)
-        .headers(default_headers())
-        .form(&data)
-        .send()
-        .await
+    match retry_request(3, 1.5, || async {
+        let resp = client
+            .post(SIGN_URL)
+            .headers(default_headers())
+            .form(&data)
+            .send()
+            .await
+            .map_err(|e| format!("签到请求失败: {}", e))?;
+
+        resp.text()
+            .await
+            .map_err(|e| format!("签到响应读取失败: {}", e))
+    })
+    .await
     {
-        Ok(resp) => match resp.json::<Value>().await {
-            Ok(json) => {
-                let error_code = json["error_code"].as_str().unwrap_or("");
-                match error_code {
-                    "0" => {
-                        let rank = json["user_info"]["user_sign_rank"]
-                            .as_str()
-                            .unwrap_or("0");
-                        info!("{} 签到成功，第{}个签到", log_prefix, rank);
-                    }
-                    "160002" => {
-                        let msg = json["error_msg"].as_str().unwrap_or("今日已签到");
-                        info!("{} {}", log_prefix, msg);
-                    }
-                    _ => {
-                        let msg = json["error_msg"].as_str().unwrap_or("未知错误");
-                        warn!("{} 签到失败，错误: {}", log_prefix, msg);
-                    }
+        Ok(text) => {
+            let json: Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("{} 签到响应JSON解析失败: {}", log_prefix, e);
+                    return;
+                }
+            };
+            let error_code = json["error_code"].as_str().unwrap_or("");
+            match error_code {
+                "0" => {
+                    let rank = json["user_info"]["user_sign_rank"]
+                        .as_str()
+                        .unwrap_or("0");
+                    info!("{} 签到成功，第{}个签到", log_prefix, rank);
+                }
+                "160002" => {
+                    let msg = json["error_msg"].as_str().unwrap_or("今日已签到");
+                    info!("{} {}", log_prefix, msg);
+                }
+                _ => {
+                    let msg = json["error_msg"].as_str().unwrap_or("未知错误");
+                    warn!("{} 签到失败，错误: {}", log_prefix, msg);
                 }
             }
-            Err(e) => {
-                error!("{} 签到响应解析失败: {}", log_prefix, e);
-            }
-        },
+        }
         Err(e) => {
-            error!("{} 签到请求失败: {}", log_prefix, e);
+            error!("{} {}", log_prefix, e);
         }
     }
 }
@@ -227,7 +281,7 @@ async fn main() {
     info!("开始处理 {} 个用户", bduss_list.len());
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
         .build()
         .expect("Failed to create HTTP client");
 
