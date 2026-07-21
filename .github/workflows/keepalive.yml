@@ -1,0 +1,30 @@
+name: Keep Actions Alive
+
+on:
+  schedule:
+    # 每月 1 号和 15 号凌晨自动运行，确保在 60 天内一定有代码改动
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch: # 支持你在网页端手动点击测试运行
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Auto commit to keep alive
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # 创建一个隐藏维护目录和时间戳
+          mkdir -p .github/maintenance
+          date > .github/maintenance/keepalive.txt
+          
+          # 提交更改并推送到 master 分支
+          git add .github/maintenance/keepalive.txt
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: keep github actions alive [skip ci]"
+            git push origin master
+          fi
